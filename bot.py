@@ -52,8 +52,14 @@ async def handle_photo(message: Message) -> None:
             os.remove(temp_image_path)
             return
             
+        # Step D: Send the Excel file back to the Telegram chat
         document = FSInputFile(excel_path)
-        await message.answer_document(document, caption="🎉 Here is your formatted vocabulary list, ready for import!")
+        caption_text = (
+            "🎉 Here is your formatted vocabulary list!\n\n"
+            "🍏 **iOS Users:** Telegram opens this in a 'preview' mode. "
+            "To import it, tap the **Share icon** (top right corner) and select your flashcard app or 'Save to Files'."
+        )
+        await message.answer_document(document, caption=caption_text)
         
         await processing_msg.delete()
         os.remove(temp_image_path)
