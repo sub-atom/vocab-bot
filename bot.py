@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, FSInputFile
 from aiogram.filters import CommandStart
 from dotenv import load_dotenv
-from aiohttp import web  # <-- Our new dummy server library!
+from aiohttp import web
 
 from Processor import extract_vocabulary, convert_to_excel
 
@@ -21,26 +21,21 @@ dp = Dispatcher()
 async def command_start_handler(message: Message) -> None:
     welcome_text = (
         f"What's up, {message.from_user.full_name}! 🤖\n\n"
-        "Send me a photo of an English textbook page, and I will instantly extract the "
-        "vocabulary into a perfectly formatted Excel file for your flashcards!"
+        "Send me a **photo**, a **PDF document**, an **uncompressed PNG**, or just **type some text**, "
+        "and I will extract the vocabulary into a beautifully formatted Excel file!"
     )
     await message.answer(welcome_text)
 
-@dp.message(F.photo)
-async def handle_photo(message: Message) -> None:
-    processing_msg = await message.answer("📸 Got the photo! My AI Brain is analyzing it... This might take a few seconds.")
-    
+# --- CENTRAL PROCESSING ENGINE ---
+# We built a master function so we don't have to write this 3 separate times!
+async def process_and_send(message: Message, processing_msg: Message, file_path=None, text_content=None, mime_type=None):
     try:
-        photo_file = await bot.get_file(message.photo[-1].file_id)
-        temp_image_path = os.path.join(BASE_DIR, "temp_telegram_image.jpg")
-        await bot.download_file(photo_file.file_path, temp_image_path)
-        
         await processing_msg.edit_text("🧠 Brain engaged: Extracting vocabulary...")
-        json_data, brain_error = extract_vocabulary(temp_image_path)
+        json_data, brain_error = extract_vocabulary(file_path=file_path, text_content=text_content, mime_type=mime_type)
         
         if brain_error:
             await processing_msg.edit_text(f"🚨 Brain Error: {brain_error}")
-            os.remove(temp_image_path)
+            if file_path: os.remove(file_path)
             return
             
         await processing_msg.edit_text("📊 Converter engaged: Formatting into Excel...")
@@ -49,24 +44,60 @@ async def handle_photo(message: Message) -> None:
         
         if conv_error:
             await processing_msg.edit_text(f"🚨 Converter Error: {conv_error}")
-            os.remove(temp_image_path)
+            if file_path: os.remove(file_path)
             return
             
-        # Step D: Send the Excel file back to the Telegram chat
         document = FSInputFile(excel_path)
         caption_text = (
             "🎉 Here is your formatted vocabulary list!\n\n"
-            "🍏 **iOS Users:** Telegram opens this in a 'preview' mode. "
-            "To import it, tap the **Share icon** (top right corner) and select your flashcard app or 'Save to Files'."
+            "🍏 **iOS Users:** Tap the **Share icon** (top right) and select your flashcard app to import."
         )
         await message.answer_document(document, caption=caption_text)
         
         await processing_msg.delete()
-        os.remove(temp_image_path)
+        if file_path: os.remove(file_path)
         os.remove(excel_path)
         
     except Exception as e:
         await message.answer(f"🚨 An unexpected error occurred: {e}")
+        if file_path and os.path.exists(file_path): os.remove(file_path)
+
+# --- THE TELEGRAM HANDLERS ---
+
+# 1. Handle Standard Photos (JPGs)
+@dp.message(F.photo)
+async def handle_photo(message: Message) -> None:
+    processing_msg = await message.answer("📸 Got the photo! Analyzing...")
+    photo_file = await bot.get_file(message.photo[-1].file_id)
+    temp_path = os.path.join(BASE_DIR, "temp_image.jpg")
+    await bot.download_file(photo_file.file_path, temp_path)
+    await process_and_send(message, processing_msg, file_path=temp_path, mime_type="image/jpeg")
+
+# 2. Handle Documents (PDFs, PNGs, etc.)
+@dp.message(F.document)
+async def handle_document(message: Message) -> None:
+    mime = message.document.mime_type
+    
+    # Check if the file is one of our accepted formats
+    if mime in ['application/pdf', 'image/png', 'image/jpeg']:
+        ext = mime.split('/')[-1]
+        processing_msg = await message.answer(f"📄 Got the {ext.upper()} file! Analyzing...")
+        doc_file = await bot.get_file(message.document.file_id)
+        temp_path = os.path.join(BASE_DIR, f"temp_doc.{ext}")
+        await bot.download_file(doc_file.file_path, temp_path)
+        await process_and_send(message, processing_msg, file_path=temp_path, mime_type=mime)
+    else:
+        await message.answer("⚠️ I can only process PDFs or Images (PNG/JPG). Please send a supported file!")
+
+# 3. Handle Plain Text
+@dp.message(F.text)
+async def handle_text(message: Message) -> None:
+    # Ignore commands like /start
+    if message.text.startswith('/'): return 
+    
+    processing_msg = await message.answer("📝 Got the text! Analyzing...")
+    await process_and_send(message, processing_msg, text_content=message.text)
+
 
 # --- THE DUMMY WEB SERVER ---
 async def handle_web(request):
@@ -74,8 +105,6 @@ async def handle_web(request):
 
 async def main() -> None:
     print("🚀 Bot is officially online and listening for messages...")
-    
-    # 1. Start the dummy web server on the port Render assigns
     app = web.Application()
     app.router.add_get('/', handle_web)
     runner = web.AppRunner(app)
@@ -85,7 +114,6 @@ async def main() -> None:
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     
-    # 2. Start the Telegram bot polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
