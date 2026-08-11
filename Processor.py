@@ -1,148 +1,162 @@
 import os
-import asyncio
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, FSInputFile
-from aiogram.filters import CommandStart
+import json
+import pandas as pd
+from google import genai
+from google.genai import types 
 from dotenv import load_dotenv
-from aiohttp import web
-from pypdf import PdfReader, PdfWriter  # <-- NEW: Our PDF Safety Slicer library!
-
-from Processor import extract_vocabulary, convert_to_excel
+import PIL.Image
+import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(BASE_DIR, '.env')
 load_dotenv(env_path)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-dp = Dispatcher()
-
-@dp.message(CommandStart())
-async def command_start_handler(message: Message) -> None:
-    welcome_text = (
-        f"What's up, {message.from_user.full_name}! 🤖\n\n"
-        "Send me a **photo**, a **PDF document**, an **uncompressed PNG**, or just **type some text**, "
-        "and I will extract the vocabulary into a beautifully formatted Excel file!"
-    )
-    await message.answer(welcome_text)
-
-# --- CENTRAL PROCESSING ENGINE ---
-async def process_and_send(message: Message, processing_msg: Message, file_path=None, text_content=None, mime_type=None):
-    try:
-        await processing_msg.edit_text("🧠 Brain engaged: Extracting vocabulary...")
-        json_data, brain_error = extract_vocabulary(file_path=file_path, text_content=text_content, mime_type=mime_type)
-        
-        if brain_error:
-            await processing_msg.edit_text(f"🚨 Brain Error: {brain_error}")
-            if file_path and os.path.exists(file_path): os.remove(file_path)
-            return
-            
-        await processing_msg.edit_text("📊 Converter engaged: Formatting into Excel...")
-        excel_filename = "vocab_export.xlsx"
-        excel_path, conv_error = convert_to_excel(json_data, excel_filename)
-        
-        if conv_error:
-            await processing_msg.edit_text(f"🚨 Converter Error: {conv_error}")
-            if file_path and os.path.exists(file_path): os.remove(file_path)
-            return
-            
-        document = FSInputFile(excel_path)
-        caption_text = (
-            "🎉 Here is your formatted vocabulary list!\n\n"
-            "🍏 **iOS Users:** Tap the **Share icon** (top right) and select your flashcard app to import."
-        )
-        await message.answer_document(document, caption=caption_text)
-        
-        await processing_msg.delete()
-        if file_path and os.path.exists(file_path): os.remove(file_path)
-        if os.path.exists(excel_path): os.remove(excel_path)
-        
-    except Exception as e:
-        await message.answer(f"🚨 An unexpected error occurred: {e}")
-        if file_path and os.path.exists(file_path): os.remove(file_path)
-
-# --- THE TELEGRAM HANDLERS ---
-
-# 1. Handle Standard Photos (JPGs)
-@dp.message(F.photo)
-async def handle_photo(message: Message) -> None:
-    processing_msg = await message.answer("📸 Got the photo! Analyzing...")
-    photo_file = await bot.get_file(message.photo[-1].file_id)
-    temp_path = os.path.join(BASE_DIR, "temp_image.jpg")
-    await bot.download_file(photo_file.file_path, temp_path)
-    await process_and_send(message, processing_msg, file_path=temp_path, mime_type="image/jpeg")
-
-# 2. Handle Documents (PDFs, PNGs, etc.)
-@dp.message(F.document)
-async def handle_document(message: Message) -> None:
-    mime = message.document.mime_type
+def extract_vocabulary(file_path=None, text_content=None, mime_type=None, mode="both"):
     
-    if mime in ['application/pdf', 'image/png', 'image/jpeg']:
-        ext = mime.split('/')[-1]
-        processing_msg = await message.answer(f"📄 Got the {ext.upper()} file! Checking safety limits...")
-        doc_file = await bot.get_file(message.document.file_id)
-        temp_path = os.path.join(BASE_DIR, f"temp_doc.{ext}")
-        await bot.download_file(doc_file.file_path, temp_path)
-        
-        # --- NEW: PDF SAFETY SLICER ---
-        if mime == 'application/pdf':
-            try:
-                reader = PdfReader(temp_path)
-                total_pages = len(reader.pages)
-                
-                max_safe_pages = 5  # The AI token safety limit!
-                
-                if total_pages > max_safe_pages:
-                    await processing_msg.edit_text(
-                        f"⚠️ **Safety System Activated!**\n"
-                        f"This PDF is {total_pages} pages long. To prevent the AI from crashing, "
-                        f"I have sliced off the first {max_safe_pages} pages and will process those now.\n\n"
-                        f"Please split the rest of your PDF into smaller chunks and send them separately!"
-                    )
-                    
-                    # Create a new mini-PDF with just the first 5 pages
-                    writer = PdfWriter()
-                    for i in range(max_safe_pages):
-                        writer.add_page(reader.pages[i])
-                        
-                    # Overwrite the original downloaded PDF with the safe, sliced version
-                    with open(temp_path, "wb") as f_out:
-                        writer.write(f_out)
-                        
-            except Exception as e:
-                await message.answer(f"🚨 PDF Slicer Error: Could not read PDF safely. {e}")
-                if os.path.exists(temp_path): os.remove(temp_path)
-                return
-        
-        # Send it to the brain!
-        await process_and_send(message, processing_msg, file_path=temp_path, mime_type=mime)
+    mode_instructions = ""
+    if mode == "translations":
+        mode_instructions = "CRITICAL: Leave the 'definition' key as an empty string (\"\"). Only provide Uzbek translations in the 'translation' key."
+    elif mode == "descriptions":
+        mode_instructions = "CRITICAL: You MUST place the English definition inside the 'translation' key. Leave the 'definition' key as an empty string (\"\")."
+    
+    # NEW PROMPT: 8 Keys now, with explicit instructions for a concise theme!
+    prompt = f"""
+    CRITICAL INSTRUCTION: You are a strict, exhaustive data extraction algorithm. 
+    Analyze the provided document, image, or text. 
+    
+    You MUST extract EVERY SINGLE vocabulary word present in the text. 
+    DO NOT summarize. DO NOT skip words. DO NOT randomly sample. 
+    
+    {mode_instructions}
+
+    Return the data STRICTLY as a valid JSON array of objects.
+    Each object MUST have exactly these 8 keys:
+    1. "word": The vocabulary word itself.
+    2. "translation": The translation into Uzbek (or empty string if unknown).
+    3. "part_of_speech": The part of speech in lowercase (e.g., noun, verb, adjective).
+    4. "definition": A clear, short English definition.
+    5. "conjugation": If the word is a verb, provide its past simple and past participle. If not, leave empty.
+    6. "example": An example sentence using the word.
+    7. "pronunciation": Phonetic spelling with slashes.
+    8. "theme": The unit name or topic. Keep it CONCISE. If the text says 'Unit 5 Food and Drinks', pick either 'Unit 5' OR 'Food and Drinks', but not both. If no unit/topic is given, invent a short, fitting one.
+    
+    Output ONLY the raw JSON array. Do not include markdown blocks like ```json or any conversational text.
+    """
+    
+    contents = [prompt]
+    uploaded_pdf = None
+    
+    if text_content:
+        contents.append(f"Text to analyze:\n{text_content}")
+    elif file_path:
+        if mime_type == 'application/pdf':
+            uploaded_pdf = client.files.upload(file=file_path)
+            contents.append(uploaded_pdf)
+        else:
+            img = PIL.Image.open(file_path)
+            contents.append(img)
     else:
-        await message.answer("⚠️ I can only process PDFs or Images (PNG/JPG). Please send a supported file!")
+        return None, "🚨 Error: No text or file provided!"
 
-# 3. Handle Plain Text
-@dp.message(F.text)
-async def handle_text(message: Message) -> None:
-    if message.text.startswith('/'): return 
-    processing_msg = await message.answer("📝 Got the text! Analyzing...")
-    await process_and_send(message, processing_msg, text_content=message.text)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model='gemini-3.6-flash',
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=8192,
+                    temperature=0.1
+                )
+            )
+            
+            if uploaded_pdf:
+                client.files.delete(name=uploaded_pdf.name)
+            
+            raw_text = response.text.strip()
+            if raw_text.startswith("```json"):
+                raw_text = raw_text[7:]
+            if raw_text.endswith("```"):
+                raw_text = raw_text[:-3]
+                
+            return raw_text.strip(), None
+            
+        except Exception as e:
+            error_message = str(e)
+            if "503" in error_message and attempt < (max_retries - 1):
+                wait_time = (attempt + 1) * 2
+                print(f"⚠️ Google API busy. Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+                continue
+            
+            if uploaded_pdf:
+                try:
+                    client.files.delete(name=uploaded_pdf.name)
+                except:
+                    pass
+                
+            if "503" in error_message:
+                return None, "Google's AI is currently overloaded with global traffic. Please wait 1 minute and try again!"
+            else:
+                return None, f"🚨 API Error: {error_message}"
 
-# --- THE DUMMY WEB SERVER ---
-async def handle_web(request):
-    return web.Response(text="Bot is running smoothly on Render!")
+def format_pos_tag(pos):
+    pos = str(pos).lower().strip()
+    mapping = {
+        'verb': 'verb::1',
+        'noun': 'noun::2',
+        'adjective': 'adjective::3',
+        'adverb': 'adverb::4',
+        'preposition': 'preposition::5'
+    }
+    return mapping.get(pos, f"{pos}::0")
 
-async def main() -> None:
-    print("🚀 Bot is officially online and listening for messages...")
-    app = web.Application()
-    app.router.add_get('/', handle_web)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    await dp.start_polling(bot)
+def convert_to_excel(json_data, output_filename="vocab_list.xlsx"):
+    try:
+        data = json.loads(json_data)
+        formatted_rows = []
+        for item in data:
+            row = {
+                "Theme": item.get("theme", "General Vocabulary"), # <-- NEW: Grabs dynamic theme!
+                "Is Under The Theme": "",
+                "Word": item.get("word", ""),
+                "Translation": item.get("translation", ""),
+                "Tags": format_pos_tag(item.get("part_of_speech", "")),
+                "Image": "",
+                "Audio": "",
+                "Definition": item.get("definition", ""),
+                "Conjugation": item.get("conjugation", ""),
+                "Declensions": "",
+                "Examples": item.get("example", ""),
+                "Pronunciation": item.get("pronunciation", ""),
+                "Transcription": ""
+            }
+            formatted_rows.append(row)
+            
+        df = pd.DataFrame(formatted_rows)
+        output_path = os.path.join(BASE_DIR, output_filename)
+        df.to_excel(output_path, index=False)
+        return output_path, None
+    except Exception as e:
+        return None, f"🚨 Pandas Error: {e}"
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# --- NEW: Pandas Excel Merger ---
+def merge_excel_files(file_paths, master_theme, output_filename):
+    try:
+        dataframes = []
+        for path in file_paths:
+            dataframes.append(pd.read_excel(path))
+        
+        # Snap them all together
+        combined_df = pd.concat(dataframes, ignore_index=True)
+        # Override the theme for every word in the merged list
+        combined_df['Theme'] = master_theme
+        
+        output_path = os.path.join(BASE_DIR, output_filename)
+        combined_df.to_excel(output_path, index=False)
+        return output_path, None
+    except Exception as e:
+        return None, f"🚨 Merge Error: {e}"
