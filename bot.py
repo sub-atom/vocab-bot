@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+import time
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import CommandStart
@@ -10,7 +11,7 @@ from dotenv import load_dotenv
 from aiohttp import web
 from pypdf import PdfReader, PdfWriter
 
-from Processor import extract_vocabulary, convert_to_excel, merge_excel_files
+from Processor import extract_and_compile_wt
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
@@ -54,16 +55,9 @@ UI = {
         "btn_target_ru": "🇷🇺 Russian",
         "btn_target_other": "✍️ Other",
         "ask_other": "✍️ **Please type the language you want to translate into:**",
-        "tutorial": "🚀 **How to use this bot:**\n\n**1. Download WordTheme**\n[Android (Google Play)](https://play.google.com/store/apps/details?id=fr.jmmoriceau.wordtheme) | [iOS (App Store)](https://apps.apple.com/us/app/wordtheme/id1603902951)\n\n**2. Prime the App**\nOpen WordTheme once and click through the intro screen so the app is awake.\n\n**3. Import your Vocabulary**\nTap the **three dots (⋮)** or the **Share icon** next to the Excel file here in Telegram. Tap **Share**, scroll through your apps, and select **WordTheme**.\n\n**4. Save**\nSelect *'Create New Theme'* and you are ready to play!\n\n*(Send me a photo, PDF, or text to begin!)*",
-        "btn_trans": "🇺🇿 Translations Only",
-        "btn_desc": "📖 Descriptions Only",
-        "btn_both": "⭐ Both",
-        "got_file": "📄 File secured! What do you want to extract?",
-        "merge_add": "🛒 **Excel File Added!**\nYou have {} file(s) in your Merge Queue.",
-        "merge_btn": "🔗 Merge Files Now",
-        "clear_btn": "❌ Clear Queue",
-        "ask_master": "🔗 **Please type a name for the new Master Theme** (e.g., 'Unit 1-3 Review').",
-        "settings_btn": "⚙️ Settings"
+        "tutorial": "🚀 **How to use this bot:**\n\n**1. Download WordTheme**\n[Android (Google Play)](https://play.google.com/store/apps/details?id=fr.jmmoriceau.wordtheme) | [iOS (App Store)](https://apps.apple.com/us/app/wordtheme/id1603902951)\n\n**2. Prime the App**\nOpen WordTheme once and click through the intro screen so the app is awake.\n\n**3. Generate & Import**\nSend me a photo, PDF, or text. I will generate a native `.wt` file loaded with neural audio and definitions. \n\nTap the generated file in Telegram to open it directly in WordTheme!\n\n*(Send a file to begin!)*",
+        "settings_btn": "⚙️ Settings",
+        "got_file": "📄 File secured! Compiling native WordTheme package..."
     },
     "ru": {
         "welcome": "Добро пожаловать в Result Vocabulary Bot! 🎓\nДавайте настроим его.",
@@ -72,16 +66,9 @@ UI = {
         "btn_target_ru": "🇷🇺 Русский",
         "btn_target_other": "✍️ Другой",
         "ask_other": "✍️ **Напишите язык, на который вы хотите переводить:**",
-        "tutorial": "🚀 **Как использовать бота:**\n\n**1. Скачайте WordTheme**\n[Android](https://play.google.com/store/apps/details?id=fr.jmmoriceau.wordtheme) | [iOS](https://apps.apple.com/us/app/wordtheme/id1603902951)\n\n**2. Подготовьте приложение**\nОткройте WordTheme один раз и пропустите вступление.\n\n**3. Импорт словаря**\nНажмите на **три точки (⋮)** или **иконку Поделиться** рядом с файлом Excel в Telegram. Нажмите **Поделиться** и выберите **WordTheme**.\n\n**4. Сохранение**\nВыберите *'Создать новую тему'*, и всё готово!\n\n*(Отправьте мне фото, PDF или текст, чтобы начать!)*",
-        "btn_trans": "🇷🇺 Только Перевод",
-        "btn_desc": "📖 Только Описание",
-        "btn_both": "⭐ Оба варианта",
-        "got_file": "📄 Файл получен! Что вы хотите извлечь?",
-        "merge_add": "🛒 **Файл Excel добавлен!**\nВ вашей очереди {} файл(ов).",
-        "merge_btn": "🔗 Объединить файлы",
-        "clear_btn": "❌ Очистить очередь",
-        "ask_master": "🔗 **Напишите название для новой главной темы** (например, 'Повторение 1-3').",
-        "settings_btn": "⚙️ Настройки"
+        "tutorial": "🚀 **Как использовать бота:**\n\n**1. Скачайте WordTheme**\n[Android](https://play.google.com/store/apps/details?id=fr.jmmoriceau.wordtheme) | [iOS](https://apps.apple.com/us/app/wordtheme/id1603902951)\n\n**2. Подготовьте приложение**\nОткройте WordTheme один раз и пропустите вступление.\n\n**3. Генерация и Импорт**\nОтправьте мне фото, PDF или текст. Я создам файл `.wt` с аудио и переводами.\n\nНажмите на файл в Telegram, чтобы открыть его в WordTheme!\n\n*(Отправьте файл, чтобы начать!)*",
+        "settings_btn": "⚙️ Настройки",
+        "got_file": "📄 Файл получен! Создаю пакет WordTheme..."
     },
     "uz": {
         "welcome": "Result Vocabulary Bot-ga xush kelibsiz! 🎓\nKeling, sozlashni boshlaymiz.",
@@ -90,40 +77,16 @@ UI = {
         "btn_target_ru": "🇷🇺 Rus",
         "btn_target_other": "✍️ Boshqa",
         "ask_other": "✍️ **Tarjima qilmoqchi bo'lgan tilni yozing:**",
-        "tutorial": "🚀 **Botdan qanday foydalanish kerak:**\n\n**1. WordTheme-ni yuklab oling**\n[Android](https://play.google.com/store/apps/details?id=fr.jmmoriceau.wordtheme) | [iOS](https://apps.apple.com/us/app/wordtheme/id1603902951)\n\n**2. Ilovani tayyorlang**\nWordTheme-ni bir marta oching va kirish qismini o'tkazib yuboring.\n\n**3. Lug'atni import qilish**\nTelegramdagi Excel fayli yonidagi **uchta nuqta (⋮)** yoki **Ulashish tugmasini** bosing. **Ulashish**-ni tanlab, **WordTheme**-ni toping.\n\n**4. Saqlash**\n*'Yangi mavzu yaratish'* ni tanlang va tayyor!\n\n*(Boshlash uchun rasm, PDF yoki matn yuboring!)*",
-        "btn_trans": "🇺🇿 Faqat Tarjima",
-        "btn_desc": "📖 Faqat Ta'rif",
-        "btn_both": "⭐ Ikkalasi",
-        "got_file": "📄 Fayl qabul qilindi! Nima ajratib olaylik?",
-        "merge_add": "🛒 **Excel fayl qo'shildi!**\nNavbatda {} ta fayl bor.",
-        "merge_btn": "🔗 Fayllarni Birlashtirish",
-        "clear_btn": "❌ Navbatni Tozalash",
-        "ask_master": "🔗 **Yangi Asosiy Mavzu nomini yozing** (masalan, '1-3 Unit Takrorlash').",
-        "settings_btn": "⚙️ Sozlamalar"
+        "tutorial": "🚀 **Botdan qanday foydalanish kerak:**\n\n**1. WordTheme-ni yuklab oling**\n[Android](https://play.google.com/store/apps/details?id=fr.jmmoriceau.wordtheme) | [iOS](https://apps.apple.com/us/app/wordtheme/id1603902951)\n\n**2. Ilovani tayyorlang**\nWordTheme-ni bir marta oching va kirish qismini o'tkazib yuboring.\n\n**3. Yaratish va Import**\nMenga rasm, PDF yoki matn yuboring. Men audiosi bilan birga tayyor `.wt` faylini yaratib beraman.\n\nTelegramdagi fayl ustiga bosib uni to'g'ridan-to'g'ri ilovada oching!\n\n*(Boshlash uchun fayl yuboring!)*",
+        "settings_btn": "⚙️ Sozlamalar",
+        "got_file": "📄 Fayl qabul qilindi! WordTheme paketini tayyorlayapman..."
     }
 }
 
-# --- 3. MEMORY STATES ---
-pending_tasks = {}
-merge_queues = {}
-awaiting_theme = {}
 awaiting_target = {}
 
 def get_main_keyboard(lang="en"):
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=UI[lang]["settings_btn"])]], resize_keyboard=True)
-
-def get_options_keyboard(lang):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=UI[lang]["btn_trans"], callback_data="mode_translations")],
-        [InlineKeyboardButton(text=UI[lang]["btn_desc"], callback_data="mode_descriptions")],
-        [InlineKeyboardButton(text=UI[lang]["btn_both"], callback_data="mode_both")]
-    ])
-
-def get_merge_keyboard(lang):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=UI[lang]["merge_btn"], callback_data="merge_now")],
-        [InlineKeyboardButton(text=UI[lang]["clear_btn"], callback_data="merge_clear")]
-    ])
 
 def get_target_keyboard(lang):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -177,85 +140,61 @@ async def settings_handler(message: Message):
     ])
     await message.answer("🌍 Change UI Language:", reply_markup=kb)
 
-# --- 5. CORE AI ENGINE ---
-async def process_and_send(message: Message, processing_msg: Message, file_path=None, text_content=None, mime_type=None, mode="both", target_lang="Uzbek"):
+# --- 5. CORE AI ENGINE & PROGRESS BAR ---
+async def process_and_send(message: Message, processing_msg: Message, file_path=None, text_content=None, mime_type=None, target_lang="Uzbek"):
+    last_update_time = time.time()
+    
+    async def update_progress(current, total):
+        nonlocal last_update_time
+        now = time.time()
+        # Prevent hitting Telegram API limits by only updating every 1.5 seconds
+        if now - last_update_time > 1.5 or current == total:
+            try:
+                await processing_msg.edit_text(f"🎙️ Generating Neural Audio: {current}/{total} words...")
+                last_update_time = now
+            except Exception:
+                pass
+
     try:
-        await processing_msg.edit_text("🧠 Brain engaged...")
-        json_data, brain_error = extract_vocabulary(file_path=file_path, text_content=text_content, mime_type=mime_type, mode=mode, target_language=target_lang)
+        wt_path, error = await extract_and_compile_wt(
+            file_path=file_path, 
+            text_content=text_content, 
+            mime_type=mime_type, 
+            target_language=target_lang,
+            progress_callback=update_progress,
+            user_id=message.from_user.id
+        )
         
-        if brain_error:
-            await processing_msg.edit_text(brain_error)
+        if error:
+            await processing_msg.edit_text(error)
             if file_path and os.path.exists(file_path): os.remove(file_path)
             return
             
-        await processing_msg.edit_text("📊 Formatting...")
-        excel_path, conv_error = convert_to_excel(json_data, f"vocab_{message.from_user.id}.xlsx")
+        await processing_msg.edit_text("📦 Packaging native WordTheme file...")
         
-        if conv_error:
-            await processing_msg.edit_text(conv_error)
-            if file_path and os.path.exists(file_path): os.remove(file_path)
-            return
-            
-        await message.answer_document(FSInputFile(excel_path))
+        document = FSInputFile(wt_path)
+        await message.answer_document(document, caption="🎉 Your native WordTheme file is ready!\n\nTap it to open directly in the app.")
+        
         await processing_msg.delete()
         if file_path and os.path.exists(file_path): os.remove(file_path)
-        if os.path.exists(excel_path): os.remove(excel_path)
+        if os.path.exists(wt_path): os.remove(wt_path)
+        
     except Exception as e:
-        await message.answer(f"🚨 Error: {e}")
+        await message.answer(f"🚨 An unexpected error occurred: {e}")
         if file_path and os.path.exists(file_path): os.remove(file_path)
 
 # --- 6. FILE HANDLERS ---
-@dp.callback_query(F.data.startswith("mode_"))
-async def process_callback(callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    if user_id not in pending_tasks: return
-    user_data = get_user(user_id)
-    target_lang = user_data[1] if user_data else "Uzbek"
-    
-    mode = callback_query.data.split("_")[1] 
-    task = pending_tasks.pop(user_id)
-    p_msg = await callback_query.message.edit_text("⚙️ Starting process...")
-    await process_and_send(callback_query.message, p_msg, task.get('file_path'), task.get('text_content'), task.get('mime_type'), mode, target_lang)
-
-@dp.callback_query(F.data == "merge_now")
-async def merge_now_callback(callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    lang = get_user(user_id)[0] if get_user(user_id) else "en"
-    awaiting_theme[user_id] = True
-    await callback_query.message.edit_text(UI[lang]["ask_master"])
-
-@dp.callback_query(F.data == "merge_clear")
-async def merge_clear_callback(callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    if user_id in merge_queues:
-        for path in merge_queues[user_id]:
-            if os.path.exists(path): os.remove(path)
-        merge_queues.pop(user_id)
-    await callback_query.message.edit_text("🗑️ Queue cleared!")
-
 @dp.message(F.document)
 async def handle_document(message: Message) -> None:
     user = get_user(message.from_user.id)
     if not user: return await message.answer("Please type /start first!")
-    lang = user[0]
+    lang, target_lang = user[0], user[1]
     
+    mime = message.document.mime_type
     ext = (message.document.file_name or "").split('.')[-1].lower()
     
-    if ext == 'xlsx':
-        user_id = message.from_user.id
-        doc_file = await bot.get_file(message.document.file_id)
-        temp_path = os.path.join(BASE_DIR, f"q_{user_id}_{message.message_id}.xlsx")
-        await bot.download_file(doc_file.file_path, temp_path)
-        
-        if user_id not in merge_queues: merge_queues[user_id] = []
-        merge_queues[user_id].append(temp_path)
-        
-        await message.answer(UI[lang]["merge_add"].format(len(merge_queues[user_id])), reply_markup=get_merge_keyboard(lang))
-        return
-
-    mime = message.document.mime_type
     if mime in ['application/pdf', 'image/png', 'image/jpeg']:
-        status_msg = await message.answer("📄 Downloading...")
+        status_msg = await message.answer(UI[lang]["got_file"])
         doc_file = await bot.get_file(message.document.file_id)
         temp_path = os.path.join(BASE_DIR, f"doc_{message.from_user.id}_{message.message_id}.{ext}")
         await bot.download_file(doc_file.file_path, temp_path)
@@ -268,22 +207,20 @@ async def handle_document(message: Message) -> None:
                 with open(temp_path, "wb") as f_out: writer.write(f_out)
                 await message.answer("⚠️ Sliced to first 5 pages for safety.")
         
-        pending_tasks[message.from_user.id] = {'file_path': temp_path, 'mime_type': mime, 'text_content': None}
-        await status_msg.edit_text(UI[lang]["got_file"], reply_markup=get_options_keyboard(lang))
+        await process_and_send(message, status_msg, file_path=temp_path, mime_type=mime, target_lang=target_lang)
 
 @dp.message(F.photo)
 async def handle_photo(message: Message) -> None:
     user = get_user(message.from_user.id)
     if not user: return await message.answer("Please type /start first!")
-    lang = user[0]
+    lang, target_lang = user[0], user[1]
     
-    status_msg = await message.answer("📸 Downloading...")
+    status_msg = await message.answer(UI[lang]["got_file"])
     photo_file = await bot.get_file(message.photo[-1].file_id)
     temp_path = os.path.join(BASE_DIR, f"img_{message.from_user.id}_{message.message_id}.jpg")
     await bot.download_file(photo_file.file_path, temp_path)
     
-    pending_tasks[message.from_user.id] = {'file_path': temp_path, 'mime_type': 'image/jpeg', 'text_content': None}
-    await status_msg.edit_text(UI[lang]["got_file"], reply_markup=get_options_keyboard(lang))
+    await process_and_send(message, status_msg, file_path=temp_path, mime_type='image/jpeg', target_lang=target_lang)
 
 @dp.message(F.text)
 async def handle_text(message: Message) -> None:
@@ -291,34 +228,16 @@ async def handle_text(message: Message) -> None:
     user_id = message.from_user.id
     user = get_user(user_id)
     if not user: return await message.answer("Please type /start first!")
-    lang = user[0]
+    lang, target_lang = user[0], user[1]
     
     if awaiting_target.get(user_id):
         save_user(user_id, lang, message.text)
         awaiting_target.pop(user_id)
         await message.answer(f"✅ Target language saved as: **{message.text}**\n\n" + UI[lang]["tutorial"], reply_markup=get_main_keyboard(lang), disable_web_page_preview=True)
         return
-        
-    if awaiting_theme.get(user_id):
-        master_theme = message.text
-        p_msg = await message.answer("⚙️ Merging...")
-        q_files = merge_queues.get(user_id, [])
-        merged_path, err = merge_excel_files(q_files, master_theme, f"merged_{user_id}.xlsx")
-        
-        if err: await p_msg.edit_text(err)
-        else:
-            await message.answer_document(FSInputFile(merged_path))
-            if os.path.exists(merged_path): os.remove(merged_path)
-            
-        for path in q_files:
-            if os.path.exists(path): os.remove(path)
-        merge_queues.pop(user_id, None)
-        awaiting_theme.pop(user_id, None)
-        await p_msg.delete()
-        return
     
-    pending_tasks[user_id] = {'file_path': None, 'mime_type': None, 'text_content': message.text}
-    await message.answer(UI[lang]["got_file"], reply_markup=get_options_keyboard(lang))
+    status_msg = await message.answer(UI[lang]["got_file"])
+    await process_and_send(message, status_msg, text_content=message.text, target_lang=target_lang)
 
 # --- DUMMY WEB SERVER ---
 async def handle_web(request): return web.Response(text="Bot is running smoothly on Render!")
