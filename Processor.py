@@ -1,49 +1,44 @@
 import os
 import json
-import pandas as pd
+import uuid
+import zipfile
+import shutil
+import asyncio
+import time
+from datetime import datetime
+import edge_tts
 from google import genai
-from google.genai import types 
+from google.genai import types
 from dotenv import load_dotenv
 import PIL.Image
-import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-env_path = os.path.join(BASE_DIR, '.env')
-load_dotenv(env_path)
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-def extract_vocabulary(file_path=None, text_content=None, mime_type=None, mode="both", target_language="Uzbek"):
-    
-    mode_instructions = ""
-    if mode == "translations":
-        # AI now translates to whatever language the user chose in settings!
-        mode_instructions = f"CRITICAL: Leave the 'definition' key as an empty string (\"\"). Only provide {target_language} translations in the 'translation' key."
-    elif mode == "descriptions":
-        mode_instructions = "CRITICAL: You MUST place the English definition inside the 'translation' key. Leave the 'definition' key as an empty string (\"\")."
-    else:
-        mode_instructions = f"CRITICAL: Provide the English definition in 'definition' AND the {target_language} translation in 'translation'."
-    
-    prompt = f"""
-    CRITICAL INSTRUCTION: You are a strict, exhaustive data extraction algorithm. 
-    Analyze the provided document, image, or text. 
-    
-    You MUST extract EVERY SINGLE vocabulary word present in the text. 
-    DO NOT summarize. DO NOT skip words. DO NOT randomly sample. 
-    
-    {mode_instructions}
+def get_time():
+    return datetime.utcnow().isoformat()[:-3] + 'Z'
 
-    Return the data STRICTLY as a valid JSON array of objects.
-    Each object MUST have exactly these 8 keys:
-    1. "word": The vocabulary word itself.
-    2. "translation": The translation (or empty string if skipped).
-    3. "part_of_speech": The part of speech in lowercase (e.g., noun, verb, adjective).
-    4. "definition": A clear, short English definition (or empty string if skipped).
-    5. "conjugation": If the word is a verb, provide its past simple and past participle. If not, leave empty.
-    6. "example": An example sentence using the word.
-    7. "pronunciation": Phonetic spelling with slashes.
-    8. "theme": The unit name or topic. Keep it CONCISE. (e.g., 'Unit 5' OR 'Food'). Invent one if missing.
+async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=None, target_language="Uzbek", progress_callback=None, user_id=1):
+    # 1. Ask the AI Brain for the data
+    prompt = f"""
+    CRITICAL INSTRUCTION: You are a strict data extraction algorithm. 
+    Extract EVERY vocabulary word from the document. DO NOT summarize or skip words.
+    Translate the word into {target_language}.
+    
+    Return STRICTLY a JSON array of objects with exactly these 10 keys:
+    1. "word": The English word.
+    2. "translation": The {target_language} translation.
+    3. "part_of_speech": The part of speech in lowercase (noun, verb, etc. - or empty string).
+    4. "definition": A clear English definition (or empty string).
+    5. "conjugation": If verb, past simple and past participle (or empty string).
+    6. "declension": Plurals or variations (or empty string).
+    7. "example": Example sentence (or empty string).
+    8. "transcription": Phonetic spelling WITHOUT slashes.
+    9. "pronunciation": Phonetic spelling WITH slashes.
+    10. "theme": Short unit name or topic. Invent one if missing.
     
     Output ONLY the raw JSON array. Do not include markdown blocks like ```json or any conversational text.
     """
@@ -63,62 +58,140 @@ def extract_vocabulary(file_path=None, text_content=None, mime_type=None, mode="
     else:
         return None, "🚨 Error: No text or file provided!"
 
-    max_retries = 3
-    for attempt in range(max_retries):
+    try:
+        # We run Gemini in a separate thread so it doesn't freeze the bot
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model='gemini-3.6-flash',
+            contents=contents,
+            config=types.GenerateContentConfig(max_output_tokens=8192, temperature=0.1)
+        )
+    except Exception as e:
+        if uploaded_pdf:
+            try: client.files.delete(name=uploaded_pdf.name)
+            except: pass
+        return None, f"🚨 AI Engine Error: {e}"
+
+    if uploaded_pdf:
+        try: client.files.delete(name=uploaded_pdf.name)
+        except: pass
+
+    raw_text = response.text.strip()
+    if raw_text.startswith("```json"): raw_text = raw_text[7:]
+    if raw_text.endswith("```"): raw_text = raw_text[:-3]
+
+    try:
+        vocab_data = json.loads(raw_text.strip())
+    except Exception as e:
+        return None, f"🚨 JSON Parse Error: AI output was corrupted. {e}"
+
+    if not vocab_data:
+        return None, "🚨 No vocabulary found in the document."
+
+    # 2. Build the WordTheme Architecture
+    build_dir = os.path.join(BASE_DIR, f"wt_build_{user_id}_{int(time.time())}")
+    os.makedirs(os.path.join(build_dir, "audio"), exist_ok=True)
+    os.makedirs(os.path.join(build_dir, "images"), exist_ok=True)
+
+    wt_database = {
+        "libelle": f"Result Vocab ({target_language})",
+        "identifier": str(uuid.uuid4()),
+        "version": "3",
+        "dm": get_time(),
+        "listAssoWT": [],
+        "ltheme": [],
+        "lword": [],
+        "ltag": [],
+        "atw": [],
+        "listWordThemeAssociation": [{"idTheme": -1, "idWord": -1}]
+    }
+
+    theme_map = {} 
+    tag_map = {} 
+    next_theme_id = 1
+    next_tag_id = 1
+    next_word_id = 1
+    total_words = len(vocab_data)
+    
+    for i, item in enumerate(vocab_data):
+        word = item.get("word", "").strip()
+        if not word: continue
+
+        # --- Generate Neural Audio ---
+        audio_filename = f"{uuid.uuid4()}.mp3"
         try:
-            response = client.models.generate_content(
-                model='gemini-3.6-flash',
-                contents=contents,
-                config=types.GenerateContentConfig(max_output_tokens=8192, temperature=0.1)
-            )
-            if uploaded_pdf: client.files.delete(name=uploaded_pdf.name)
-            
-            raw_text = response.text.strip()
-            if raw_text.startswith("```json"): raw_text = raw_text[7:]
-            if raw_text.endswith("```"): raw_text = raw_text[:-3]
-            return raw_text.strip(), None
-            
+            communicate = edge_tts.Communicate(word, "en-US-AriaNeural")
+            await communicate.save(os.path.join(build_dir, "audio", audio_filename))
         except Exception as e:
-            error_message = str(e)
-            if "503" in error_message and attempt < (max_retries - 1):
-                wait_time = (attempt + 1) * 2
-                print(f"⚠️ API busy. Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-                continue
-            if uploaded_pdf:
-                try: client.files.delete(name=uploaded_pdf.name)
-                except: pass
-            if "503" in error_message:
-                return None, "Google's AI is currently overloaded with global traffic. Please wait 1 minute and try again!"
-            return None, f"🚨 API Error: {error_message}"
+            audio_filename = "" 
+            print(f"Audio failed for {word}: {e}")
 
-def format_pos_tag(pos):
-    mapping = {'verb': 'verb::1', 'noun': 'noun::2', 'adjective': 'adjective::3', 'adverb': 'adverb::4', 'preposition': 'preposition::5'}
-    return mapping.get(str(pos).lower().strip(), f"{pos}::0")
+        # Update the live progress bar in Telegram
+        if progress_callback:
+            await progress_callback(i + 1, total_words)
 
-def convert_to_excel(json_data, output_filename="vocab_list.xlsx"):
-    try:
-        data = json.loads(json_data)
-        formatted_rows = [{
-            "Theme": item.get("theme", "Vocabulary"),
-            "Is Under The Theme": "", "Word": item.get("word", ""), "Translation": item.get("translation", ""),
-            "Tags": format_pos_tag(item.get("part_of_speech", "")), "Image": "", "Audio": "",
-            "Definition": item.get("definition", ""), "Conjugation": item.get("conjugation", ""),
-            "Declensions": "", "Examples": item.get("example", ""), "Pronunciation": item.get("pronunciation", ""),
-            "Transcription": ""
-        } for item in data]
-        df = pd.DataFrame(formatted_rows)
-        out_path = os.path.join(BASE_DIR, output_filename)
-        df.to_excel(out_path, index=False)
-        return out_path, None
-    except Exception as e: return None, f"🚨 Pandas Error: {e}"
+        # --- Map the Theme ---
+        theme_name = item.get("theme", "General").strip()
+        if theme_name not in theme_map:
+            theme_map[theme_name] = next_theme_id
+            wt_database["ltheme"].append({"id": next_theme_id, "uid": str(uuid.uuid4()), "l": theme_name, "dm": get_time()})
+            next_theme_id += 1
+        t_id = theme_map[theme_name]
 
-def merge_excel_files(file_paths, master_theme, output_filename):
-    try:
-        dataframes = [pd.read_excel(path) for path in file_paths]
-        combined_df = pd.concat(dataframes, ignore_index=True)
-        combined_df['Theme'] = master_theme
-        out_path = os.path.join(BASE_DIR, output_filename)
-        combined_df.to_excel(out_path, index=False)
-        return out_path, None
-    except Exception as e: return None, f"🚨 Merge Error: {e}"
+        # --- Map the Part of Speech Tag ---
+        pos = item.get("part_of_speech", "").lower().strip()
+        if pos:
+            if pos not in tag_map:
+                tag_map[pos] = next_tag_id
+                wt_database["ltag"].append({"id": next_tag_id, "l": pos + "\n", "c": 1})
+                next_tag_id += 1
+            wt_database["atw"].append({"t": tag_map[pos], "w": next_word_id})
+
+        # --- Build the Rich Text Fields (GCL) ---
+        gcl = []
+        def add_gcl(t_val, text):
+            if text and str(text).strip():
+                gcl.append({
+                    "uid": str(uuid.uuid4()), "t": t_val, "i": len(gcl)+1, "dm": get_time(),
+                    "lcw": [{"uid": str(uuid.uuid4()), "l": str(text).strip(), "i": 1, "dm": get_time()}]
+                })
+        
+        add_gcl(1, item.get("definition"))
+        add_gcl(2, item.get("conjugation"))
+        add_gcl(3, item.get("declension"))
+        add_gcl(4, item.get("example"))
+        add_gcl(9, item.get("transcription"))
+        add_gcl(10, item.get("pronunciation"))
+
+        # --- Construct the Word ---
+        word_obj = {
+            "id": next_word_id,
+            "uid": str(uuid.uuid4()),
+            "m": word,
+            "t": item.get("translation", ""),
+            "dc": get_time(),
+            "dm": get_time(),
+            "tm": 4,
+            "gcl": gcl
+        }
+        if audio_filename:
+            word_obj["s"] = audio_filename
+
+        wt_database["lword"].append(word_obj)
+        wt_database["listAssoWT"].append({"t": t_id, "w": next_word_id})
+        next_word_id += 1
+
+    # 3. Zip into .wt format
+    with open(os.path.join(build_dir, "dictionary.txt"), "w", encoding="utf-8") as f:
+        json.dump(wt_database, f, separators=(',', ':'))
+
+    output_wt = os.path.join(BASE_DIR, f"Result_Vocab_{user_id}_{int(time.time())}.wt")
+    
+    with zipfile.ZipFile(output_wt, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(os.path.join(build_dir, "dictionary.txt"), "dictionary.txt")
+        for root, _, files in os.walk(os.path.join(build_dir, "audio")):
+            for file in files:
+                zf.write(os.path.join(root, file), f"audio/{file}")
+
+    shutil.rmtree(build_dir, ignore_errors=True)
+    return output_wt, None
