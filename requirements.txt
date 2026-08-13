@@ -1,8 +1,7 @@
 aiogram
-pandas
 google-genai
 python-dotenv
-openpyxl
 Pillow
 aiohttp
 pypdf
+edge-tts
