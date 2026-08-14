@@ -64,7 +64,11 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
             client.models.generate_content,
             model='gemini-3.6-flash',
             contents=contents,
-            config=types.GenerateContentConfig(max_output_tokens=8192, temperature=0.1)
+            config=types.GenerateContentConfig(
+                max_output_tokens=8192, 
+                temperature=0.1,
+                response_mime_type="application/json"  # <--- THE SILVER BULLET
+            )
         )
     except Exception as e:
         if uploaded_pdf:
