@@ -21,11 +21,36 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 def get_time():
     return datetime.utcnow().isoformat()[:-3] + 'Z'
 
+def salvage_json(raw_text):
+    """Heals broken JSON strings if the AI gets cut off by token limits."""
+    raw_text = raw_text.strip()
+    if raw_text.startswith("```json"): raw_text = raw_text[7:]
+    if raw_text.endswith("```"): raw_text = raw_text[:-3]
+    raw_text = raw_text.strip()
+    
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        pass
+    
+    # If the AI hit the token limit, find the last completed object and seal the array.
+    last_brace = raw_text.rfind('}')
+    if last_brace != -1:
+        salvaged = raw_text[:last_brace+1]
+        if not salvaged.startswith('['):
+            salvaged = '[' + salvaged
+        salvaged += ']'
+        try:
+            return json.loads(salvaged)
+        except Exception:
+            pass
+            
+    return None
+
 async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=None, target_language="Uzbek", progress_callback=None, user_id=1):
-    # 1. Ask the AI Brain for the data
     prompt = f"""
     CRITICAL INSTRUCTION: You are a strict data extraction algorithm. 
-    Extract EVERY vocabulary word from the document. DO NOT summarize or skip words.
+    Extract EVERY vocabulary word from the document. DO NOT summarize.
     Translate the word into {target_language}.
     
     Return STRICTLY a JSON array of objects with exactly these 10 keys:
@@ -39,8 +64,6 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
     8. "transcription": Phonetic spelling WITHOUT slashes.
     9. "pronunciation": Phonetic spelling WITH slashes.
     10. "theme": Short unit name or topic. Invent one if missing.
-    
-    Output ONLY the raw JSON array. Do not include markdown blocks like ```json or any conversational text.
     """
     
     contents = [prompt]
@@ -58,7 +81,7 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
     else:
         return None, "🚨 Error: No text or file provided!"
 
-    # 1. Define the impenetrable JSON Schema blueprint
+    # Titanium JSON Schema
     vocab_schema = types.Schema(
         type=types.Type.ARRAY,
         items=types.Schema(
@@ -75,22 +98,20 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
                 "pronunciation": types.Schema(type=types.Type.STRING),
                 "theme": types.Schema(type=types.Type.STRING)
             },
-            # Force the AI to include every single key, even if empty
             required=["word", "translation", "part_of_speech", "definition", "conjugation", "declension", "example", "transcription", "pronunciation", "theme"]
         )
     )
 
-    # 2. Fire the API with the schema locked in
     try:
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model='gemini-3.6-flash',
+            model='gemini-1.5-flash',
             contents=contents,
             config=types.GenerateContentConfig(
                 max_output_tokens=8192, 
                 temperature=0.1,
                 response_mime_type="application/json",
-                response_schema=vocab_schema  # <--- THE TITANIUM BULLET
+                response_schema=vocab_schema
             )
         )
     except Exception as e:
@@ -98,24 +119,16 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
             try: client.files.delete(name=uploaded_pdf.name)
             except: pass
         return None, f"🚨 AI Engine Error: {e}"
-        
+
     if uploaded_pdf:
         try: client.files.delete(name=uploaded_pdf.name)
         except: pass
 
-    raw_text = response.text.strip()
-    if raw_text.startswith("```json"): raw_text = raw_text[7:]
-    if raw_text.endswith("```"): raw_text = raw_text[:-3]
-
-    try:
-        vocab_data = json.loads(raw_text.strip())
-    except Exception as e:
-        return None, f"🚨 JSON Parse Error: AI output was corrupted. {e}"
+    vocab_data = salvage_json(response.text)
 
     if not vocab_data:
-        return None, "🚨 No vocabulary found in the document."
+        return None, "🚨 Fatal Parsing Error: The AI output was completely mangled and could not be salvaged. Try sending a smaller document or fewer pages."
 
-    # 2. Build the WordTheme Architecture
     build_dir = os.path.join(BASE_DIR, f"wt_build_{user_id}_{int(time.time())}")
     os.makedirs(os.path.join(build_dir, "audio"), exist_ok=True)
     os.makedirs(os.path.join(build_dir, "images"), exist_ok=True)
@@ -144,20 +157,16 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
         word = item.get("word", "").strip()
         if not word: continue
 
-        # --- Generate Neural Audio ---
         audio_filename = f"{uuid.uuid4()}.mp3"
         try:
             communicate = edge_tts.Communicate(word, "en-US-AriaNeural")
             await communicate.save(os.path.join(build_dir, "audio", audio_filename))
-        except Exception as e:
+        except Exception:
             audio_filename = "" 
-            print(f"Audio failed for {word}: {e}")
 
-        # Update the live progress bar in Telegram
         if progress_callback:
             await progress_callback(i + 1, total_words)
 
-        # --- Map the Theme ---
         theme_name = item.get("theme", "General").strip()
         if theme_name not in theme_map:
             theme_map[theme_name] = next_theme_id
@@ -165,29 +174,16 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
             next_theme_id += 1
         t_id = theme_map[theme_name]
 
-        # --- Map the Part of Speech Tag (Native UI Fix) ---
         pos = item.get("part_of_speech", "").lower().strip()
         if pos:
             if pos not in tag_map:
                 tag_map[pos] = next_tag_id
-                
-                # WordTheme Native Color Codes: 1=Blue, 2=Red, 3=Green, 4=Orange, 5=Purple
-                color_map = {
-                    "verb": 1,
-                    "adjective": 2,
-                    "noun": 3,
-                    "adverb": 4,
-                    "preposition": 5
-                }
-                # Grab the correct color, default to 1 (Blue) if unknown
+                color_map = {"verb": 1, "adjective": 2, "noun": 3, "adverb": 4, "preposition": 5}
                 tag_color = color_map.get(pos, 1)
-                
-                # CRITICAL: We pass exactly `pos` with NO newline character (\n)
                 wt_database["ltag"].append({"id": next_tag_id, "l": pos, "c": tag_color})
                 next_tag_id += 1
-                
             wt_database["atw"].append({"t": tag_map[pos], "w": next_word_id})
-        # --- Build the Rich Text Fields (GCL) ---
+
         gcl = []
         def add_gcl(t_val, text):
             if text and str(text).strip():
@@ -203,7 +199,6 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
         add_gcl(9, item.get("transcription"))
         add_gcl(10, item.get("pronunciation"))
 
-        # --- Construct the Word ---
         word_obj = {
             "id": next_word_id,
             "uid": str(uuid.uuid4()),
@@ -221,7 +216,6 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
         wt_database["listAssoWT"].append({"t": t_id, "w": next_word_id})
         next_word_id += 1
 
-    # 3. Zip into .wt format
     with open(os.path.join(build_dir, "dictionary.txt"), "w", encoding="utf-8") as f:
         json.dump(wt_database, f, separators=(',', ':'))
 
