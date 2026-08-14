@@ -138,15 +138,28 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
             next_theme_id += 1
         t_id = theme_map[theme_name]
 
-        # --- Map the Part of Speech Tag ---
+        # --- Map the Part of Speech Tag (Native UI Fix) ---
         pos = item.get("part_of_speech", "").lower().strip()
         if pos:
             if pos not in tag_map:
                 tag_map[pos] = next_tag_id
-                wt_database["ltag"].append({"id": next_tag_id, "l": pos + "\n", "c": 1})
+                
+                # WordTheme Native Color Codes: 1=Blue, 2=Red, 3=Green, 4=Orange, 5=Purple
+                color_map = {
+                    "verb": 1,
+                    "adjective": 2,
+                    "noun": 3,
+                    "adverb": 4,
+                    "preposition": 5
+                }
+                # Grab the correct color, default to 1 (Blue) if unknown
+                tag_color = color_map.get(pos, 1)
+                
+                # CRITICAL: We pass exactly `pos` with NO newline character (\n)
+                wt_database["ltag"].append({"id": next_tag_id, "l": pos, "c": tag_color})
                 next_tag_id += 1
+                
             wt_database["atw"].append({"t": tag_map[pos], "w": next_word_id})
-
         # --- Build the Rich Text Fields (GCL) ---
         gcl = []
         def add_gcl(t_val, text):
