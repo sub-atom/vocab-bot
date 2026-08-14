@@ -58,8 +58,30 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
     else:
         return None, "🚨 Error: No text or file provided!"
 
+    # 1. Define the impenetrable JSON Schema blueprint
+    vocab_schema = types.Schema(
+        type=types.Type.ARRAY,
+        items=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "word": types.Schema(type=types.Type.STRING),
+                "translation": types.Schema(type=types.Type.STRING),
+                "part_of_speech": types.Schema(type=types.Type.STRING),
+                "definition": types.Schema(type=types.Type.STRING),
+                "conjugation": types.Schema(type=types.Type.STRING),
+                "declension": types.Schema(type=types.Type.STRING),
+                "example": types.Schema(type=types.Type.STRING),
+                "transcription": types.Schema(type=types.Type.STRING),
+                "pronunciation": types.Schema(type=types.Type.STRING),
+                "theme": types.Schema(type=types.Type.STRING)
+            },
+            # Force the AI to include every single key, even if empty
+            required=["word", "translation", "part_of_speech", "definition", "conjugation", "declension", "example", "transcription", "pronunciation", "theme"]
+        )
+    )
+
+    # 2. Fire the API with the schema locked in
     try:
-        # We run Gemini in a separate thread so it doesn't freeze the bot
         response = await asyncio.to_thread(
             client.models.generate_content,
             model='gemini-3.6-flash',
@@ -67,7 +89,8 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
             config=types.GenerateContentConfig(
                 max_output_tokens=8192, 
                 temperature=0.1,
-                response_mime_type="application/json"  # <--- THE SILVER BULLET
+                response_mime_type="application/json",
+                response_schema=vocab_schema  # <--- THE TITANIUM BULLET
             )
         )
     except Exception as e:
@@ -75,7 +98,7 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
             try: client.files.delete(name=uploaded_pdf.name)
             except: pass
         return None, f"🚨 AI Engine Error: {e}"
-
+        
     if uploaded_pdf:
         try: client.files.delete(name=uploaded_pdf.name)
         except: pass
