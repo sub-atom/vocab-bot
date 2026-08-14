@@ -105,7 +105,7 @@ async def extract_and_compile_wt(file_path=None, text_content=None, mime_type=No
     try:
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model='gemini-1.5-flash',
+            model='gemini-3.6-flash',
             contents=contents,
             config=types.GenerateContentConfig(
                 max_output_tokens=8192, 
