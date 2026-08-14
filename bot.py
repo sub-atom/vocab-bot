@@ -132,20 +132,23 @@ async def process_and_send(message: Message, processing_msg: Message, file_path=
             except Exception:
                 pass
 
-    try:
-        wt_path, error = await extract_and_compile_wt(
-            file_path=file_path, 
-            text_content=text_content, 
-            mime_type=mime_type, 
-            target_language=target_lang,
-            progress_callback=update_progress,
-            user_id=message.from_user.id
+   try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model='gemini-3.6-flash',  # <--- CHANGE THIS BACK TO 3.6
+            contents=contents,
+            config=types.GenerateContentConfig(
+                max_output_tokens=8192, 
+                temperature=0.1,
+                response_mime_type="application/json",
+                response_schema=vocab_schema
+            )
         )
-        
-        if error:
-            await processing_msg.edit_text(error)
-            if file_path and os.path.exists(file_path): os.remove(file_path)
-            return
+    except Exception as e:
+        if uploaded_pdf:
+            try: client.files.delete(name=uploaded_pdf.name)
+            except: pass
+        return None, f"🚨 AI Engine Error: {e}"
             
         await processing_msg.edit_text("📦 Packaging native WordTheme file...")
         
